@@ -78,7 +78,7 @@ for e in envs:
     gymkey = f"magent2-{name}"
     gym.register(
         gymkey,
-        entry_point="envs.pz_wrapper:MAgent2Wrapper",
+        entry_point="envs.magent_wrapper:MAgent2Wrapper",
         kwargs={
             "env_name": filename,
         },
