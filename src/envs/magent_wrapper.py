@@ -15,7 +15,7 @@ class MAgent2Wrapper(gym.Env):
 
     def __init__(self, env_name, **kwargs):
         # Dynamically load the MAgent2 environment
-        env_module = importlib.import_module(f"magent2.envs.{env_name}")
+        env_module = importlib.import_module(f"magent2.environments.{env_name}")
         self._env = env_module.parallel_env(**kwargs)
         self._env.reset()
 
