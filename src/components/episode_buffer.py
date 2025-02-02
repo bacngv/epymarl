@@ -2,7 +2,6 @@ import torch as th
 import numpy as np
 from types import SimpleNamespace as SN
 
-
 class EpisodeBatch:
     def __init__(self,
                  scheme,
@@ -86,8 +85,7 @@ class EpisodeBatch:
 
     def update(self, data, bs=slice(None), ts=slice(None), mark_filled=True):
         slices = self._parse_slices((bs, ts))
-        #print(f"!!! Updating buffer with data: {data}")
-        for k, v in data.items(): # Maps each field to save to its value.
+        for k, v in data.items():
             if k in self.data.transition_data:
                 target = self.data.transition_data
                 if mark_filled:
@@ -101,8 +99,33 @@ class EpisodeBatch:
                 raise KeyError("{} not found in transition or episode data".format(k))
 
             dtype = self.scheme[k].get("dtype", th.float32)
-            if type(v) == list:
+            if isinstance(v, list):
                 v = th.tensor(np.array(v), dtype=dtype, device=self.device)
+            
+            # Handle dynamic agent count
+            current_shape = target[k][_slices].shape
+            incoming_shape = v.shape
+            
+            # If shapes don't match and it's due to the agent dimension
+            if v.shape != current_shape and len(v.shape) == len(current_shape):
+                # Identify which dimension has agents (usually dim 2, after batch and time dimensions)
+                agent_dim = 2 if len(current_shape) > 2 else 0
+                
+                if agent_dim < len(v.shape):  # Make sure the dimension exists
+                    # Create a new zero tensor with the target shape
+                    new_tensor = th.zeros(current_shape, dtype=dtype, device=self.device)
+                    
+                    # Calculate the number of agents to copy
+                    num_agents = min(v.shape[agent_dim], current_shape[agent_dim])
+                    
+                    # Create slicing for the correct dimension
+                    if agent_dim == 2:
+                        new_tensor[..., :num_agents] = v[..., :num_agents]
+                    else:
+                        new_tensor[:num_agents] = v[:num_agents]
+                    
+                    v = new_tensor
+
             self._check_safe_view(v, target[k][_slices])
             target[k][_slices] = v.view_as(target[k][_slices])
 
@@ -204,8 +227,6 @@ class EpisodeBatch:
                                                                                      self.max_seq_length,
                                                                                      self.scheme.keys(),
                                                                                      self.groups.keys())
-
-
 class ReplayBuffer(EpisodeBatch):
     def __init__(self, scheme, groups, buffer_size, max_seq_length, preprocess=None, device="cpu"):
         super(ReplayBuffer, self).__init__(scheme, groups, buffer_size, max_seq_length, preprocess=preprocess, device=device)
