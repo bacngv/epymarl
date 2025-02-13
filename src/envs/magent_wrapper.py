@@ -12,17 +12,16 @@ class MAgent2Wrapper(gym.Env):
         "render_modes": ["human", "rgb_array"],
         "render_fps": 5,
     }
-
-    def __init__(self, env_name, **kwargs):
-        # Dynamically load the MAgent2 environment
+    def __init__(self, env_name, map_size=30, **kwargs):
+        env_kwargs = {"map_size": map_size}
+        env_kwargs.update(kwargs)
         env_module = importlib.import_module(f"magent2.environments.{env_name}")
-        self._env = env_module.parallel_env(**kwargs)
+        self._env = env_module.parallel_env(**env_kwargs)
         self._env.reset()
 
         self.n_agents = self._env.num_agents
         self.last_obs = None
 
-        # Define action and observation spaces as Tuples for all agents
         self.action_space = Tuple(
             tuple([self._env.action_space(k) for k in self._env.agents])
         )
@@ -56,7 +55,6 @@ class MAgent2Wrapper(gym.Env):
             for key, value in infos[k].items()
         }
         if done:
-            # Handle terminated episodes
             assert len(obs) == 0
             assert len(rewards) == 0
             obs = self.last_obs
@@ -68,8 +66,6 @@ class MAgent2Wrapper(gym.Env):
     def close(self):
         return self._env.close()
 
-
-# Automatically register MAgent2 environments
 envs = Path(magent2.__path__[0]).glob("**/*_v?.py")
 for e in envs:
     name = e.stem.replace("_", "-")
@@ -81,5 +77,6 @@ for e in envs:
         entry_point="envs.magent_wrapper:MAgent2Wrapper",
         kwargs={
             "env_name": filename,
+            "map_size": 30
         },
     )
