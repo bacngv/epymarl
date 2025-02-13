@@ -17,7 +17,10 @@ class EpisodeBatch:
         self.max_seq_length = max_seq_length
         self.preprocess = {} if preprocess is None else preprocess
         self.device = device
-
+        
+        self.initial_shapes = {}
+        self.initial_sizes = {}
+        
         if data is not None:
             self.data = data
         else:
@@ -68,20 +71,13 @@ class EpisodeBatch:
             else:
                 shape = vshape
 
+            self.initial_shapes[field_key] = shape
+            self.initial_sizes[field_key] = int(np.prod(shape))
+
             if episode_const:
                 self.data.episode_data[field_key] = th.zeros((batch_size, *shape), dtype=dtype, device=self.device)
             else:
                 self.data.transition_data[field_key] = th.zeros((batch_size, max_seq_length, *shape), dtype=dtype, device=self.device)
-
-    def extend(self, scheme, groups=None):
-        self._setup_data(scheme, self.groups if groups is None else groups, self.batch_size, self.max_seq_length)
-
-    def to(self, device):
-        for k, v in self.data.transition_data.items():
-            self.data.transition_data[k] = v.to(device)
-        for k, v in self.data.episode_data.items():
-            self.data.episode_data[k] = v.to(device)
-        self.device = device
 
     def update(self, data, bs=slice(None), ts=slice(None), mark_filled=True):
         slices = self._parse_slices((bs, ts))
@@ -101,33 +97,39 @@ class EpisodeBatch:
             dtype = self.scheme[k].get("dtype", th.float32)
             if isinstance(v, list):
                 v = th.tensor(np.array(v), dtype=dtype, device=self.device)
-            
-            # Handle dynamic agent count
-            current_shape = target[k][_slices].shape
-            incoming_shape = v.shape
-            
-            # If shapes don't match and it's due to the agent dimension
-            if v.shape != current_shape and len(v.shape) == len(current_shape):
-                # Identify which dimension has agents (usually dim 2, after batch and time dimensions)
-                agent_dim = 2 if len(current_shape) > 2 else 0
-                
-                if agent_dim < len(v.shape):  # Make sure the dimension exists
-                    # Create a new zero tensor with the target shape
-                    new_tensor = th.zeros(current_shape, dtype=dtype, device=self.device)
-                    
-                    # Calculate the number of agents to copy
-                    num_agents = min(v.shape[agent_dim], current_shape[agent_dim])
-                    
-                    # Create slicing for the correct dimension
-                    if agent_dim == 2:
-                        new_tensor[..., :num_agents] = v[..., :num_agents]
-                    else:
-                        new_tensor[:num_agents] = v[:num_agents]
-                    
-                    v = new_tensor
 
-            self._check_safe_view(v, target[k][_slices])
-            target[k][_slices] = v.view_as(target[k][_slices])
+            target_shape = target[k][_slices].shape
+
+            if len(v.shape) == 1:
+                expected_size = self.initial_sizes[k]
+                current_size = v.shape[0]
+                
+                if current_size <= expected_size:
+                    new_tensor = th.zeros(target_shape, dtype=dtype, device=self.device)
+                    try:
+                        v = v.reshape(-1, *self.initial_shapes[k])
+                        if len(target_shape) == 3:  # transition data
+                            new_tensor[0, 0, :current_size] = v.reshape(-1)[:current_size]
+                        else:  # episode data
+                            new_tensor[0, :current_size] = v.reshape(-1)[:current_size]
+                        v = new_tensor
+                    except RuntimeError:
+                        # If reshape fails, try to maintain the original shape
+                        v = v[:expected_size].reshape(target_shape)
+            
+            elif v.shape != target_shape:
+                new_tensor = th.zeros(target_shape, dtype=dtype, device=self.device)
+                if len(v.shape) == len(target_shape):
+                    min_sizes = [min(v.shape[i], target_shape[i]) for i in range(len(v.shape))]
+                    slices_list = tuple(slice(0, size) for size in min_sizes)
+                    new_tensor[slices_list] = v[slices_list]
+                v = new_tensor
+
+            try:
+                self._check_safe_view(v, target[k][_slices])
+                target[k][_slices] = v.view_as(target[k][_slices])
+            except ValueError as e:
+                raise ValueError(f"Shape mismatch for key {k}: target shape {target_shape}, input shape {v.shape}") from e
 
             if k in self.preprocess:
                 new_k = self.preprocess[k][0]
@@ -144,6 +146,17 @@ class EpisodeBatch:
                     raise ValueError("Unsafe reshape of {} to {}".format(v.shape, dest.shape))
             else:
                 idx -= 1
+
+
+    def extend(self, scheme, groups=None):
+        self._setup_data(scheme, self.groups if groups is None else groups, self.batch_size, self.max_seq_length)
+
+    def to(self, device):
+        for k, v in self.data.transition_data.items():
+            self.data.transition_data[k] = v.to(device)
+        for k, v in self.data.episode_data.items():
+            self.data.episode_data[k] = v.to(device)
+        self.device = device
 
     def __getitem__(self, item):
         if isinstance(item, str):
@@ -259,7 +272,6 @@ class ReplayBuffer(EpisodeBatch):
         if self.episodes_in_buffer == batch_size:
             return self[:batch_size]
         else:
-            # Uniform sampling only atm
             ep_ids = np.random.choice(self.episodes_in_buffer, batch_size, replace=False)
             return self[ep_ids]
 
